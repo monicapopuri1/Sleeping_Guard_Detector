@@ -1,0 +1,26 @@
+# Model weights -- downloaded separately (see README), not committed
+*.pt
+*.pth
+*.onnx
+
+# Sample footage and generated output -- never committed (project rule)
+*.mp4
+*.avi
+*.mov
+out/
+verify_out*/
+annotated/
+alerts/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

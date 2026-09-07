@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "guard-monitor"
+version = "0.1.0"
+description = "Real-time vacant-post and sleeping-guard detection for a single CCTV stream."
+requires-python = ">=3.10"
+dependencies = [
+    "ultralytics>=8.3.0",
+    "opencv-python>=4.10",
+    "numpy>=2.0",
+    "requests>=2.31",
+]
+
+[project.optional-dependencies]
+loguru = ["loguru>=0.7"]
+
+[tool.setuptools.packages.find]
+include = ["guard_monitor*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
