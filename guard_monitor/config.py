@@ -53,7 +53,7 @@ class GuardMonitorConfig:
     dwell_to_suspect: float = 30.0
     dwell_to_alert: float = 90.0
     track_min_age: float = 3.0
-    calibration_sec: float = 300.0
+    calibration_sec: float = 180.0
     vacant_dwell_min: float = 5.0
     starts_of_shift_quiet_min: float = 10.0
 
@@ -81,18 +81,21 @@ class GuardMonitorConfig:
     # by SLIDING_WINDOW averaging on a brief-but-real wake event (a guard
     # standing up for a few seconds). Three independent, cheaper-to-fool
     # -differently signals replace it; any one of them is a wake:
-    wake_long_thresh: float = 2.0           # per-second units; replaces WAKE_THRESH (was 0.18)
+    # per-second units; replaces WAKE_THRESH (was 0.18)
+    wake_long_thresh: float = 2.0
     wake_short_thresh: float = 3.0          # per-second units; immediate, no sustain
     wake_short_window_sec: float = 0.5
     bbox_height_wake_frac: float = 0.25     # bbox height self-relative change
     bbox_center_wake_frac: float = 0.30     # bbox center move / person_h
     bbox_wake_window_sec: float = 2.0
-    woke_up_hold_sec: float = 3.0           # replaces WOKE_UP_SUSTAIN_SEC (was 10)
+    # replaces WOKE_UP_SUSTAIN_SEC (was 10)
+    woke_up_hold_sec: float = 3.0
 
     # --- Fix 2: alert must not reset the evidence ----------------------
     realert_cooldown_sec: float = 180.0
     redoze_min_zero_sec: float = 15.0
-    evidence_decay_active: float = 1.5      # sleep_evidence_seconds -= this * dt in ACTIVE
+    # sleep_evidence_seconds -= this * dt in ACTIVE
+    evidence_decay_active: float = 1.5
     evidence_decay_slow: float = 0.1        # decay elsewhere when no signal present
 
     # --- Fix 3: calibration must reject sleeping postures ---------------
@@ -104,7 +107,8 @@ class GuardMonitorConfig:
     rebaseline_min_active_sec: float = 60.0
     rebaseline_max_head_tilt: float = 12.0
     rebaseline_max_shift_deg: float = 25.0
-    rebaseline_blend_old: float = 0.7       # new_baseline = old*this + observed*(1-this)
+    # new_baseline = old*this + observed*(1-this)
+    rebaseline_blend_old: float = 0.7
 
     # --- Fix 5: long-stillness-with-no-signal VLM second opinion --------
     long_still_sec: float = 180.0
