@@ -125,7 +125,6 @@ def replay(video_path: str, config: GuardMonitorConfig, pose_weights: str, devic
     wake_transitions = 0
 
     frame_idx = 0
-    now_wall = datetime.now()  # fixed reference; irrelevant for a file replay well outside any quiet window
     quiet = False
     last_infer_ts = None
 
@@ -135,6 +134,11 @@ def replay(video_path: str, config: GuardMonitorConfig, pose_weights: str, devic
             break
         ts = frame_idx / fps
         frame_idx += 1
+        # Refreshed every frame, matching runner.py's run() loop -- a
+        # frozen reference here made every alert in a replay collapse to
+        # the same wall-clock detected_at, colliding their alert
+        # directory names when more than one alert fires per run.
+        now_wall = datetime.now()
         ring_buffer.push(ts, frame)
 
         # Mirrors runner.run()'s should_infer gate exactly -- this script

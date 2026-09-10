@@ -337,6 +337,25 @@ def _process_person(person, frame, ts, now_wall, quiet, tracks, rows_history, ga
         )
     )
 
+    if result.episode_closed and result.episode_alert_ts is not None:
+        wake_started_ts = result.episode_wake_started_ts if result.episode_wake_started_ts is not None else ts
+        alert_sent_at = now_wall - timedelta(seconds=(ts - result.episode_alert_ts))
+        woke_at = now_wall - timedelta(seconds=(ts - wake_started_ts))
+        events_csv.append({
+            "timestamp": now_wall.isoformat(),
+            "gate_id": gate_id,
+            "alert_type": "EPISODE_CLOSED",
+            "track_id": person.track_id,
+            "started_at": alert_sent_at.isoformat(),
+            "detected_at": woke_at.isoformat(),
+            "duration_sec": (now_wall - alert_sent_at).total_seconds(),
+            "note": (
+                f"alert_sent={alert_sent_at.isoformat()} "
+                f"woke_at={woke_at.isoformat()} "
+                f"closed_at={now_wall.isoformat()}"
+            ),
+        })
+
     ctx.calibrator.maybe_rebaseline(
         ts,
         result.state is GuardState.ACTIVE,

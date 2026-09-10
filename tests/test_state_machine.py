@@ -127,22 +127,142 @@ def test_wake_via_bbox_backstop_is_immediate_from_still(config):
     assert result.state is GuardState.WOKE_UP
 
 
-def test_wake_via_short_window_burst_is_immediate(config):
+def test_soft_wake_short_burst_is_a_stir_not_instant(config):
+    """F7: the two motion-based signals are ambiguous (could be tossing
+    in sleep), so unlike bbox_wake they do NOT reset instantly -- they
+    must be confirmed for AWAKE_CONFIRM_SEC first."""
     sm = GuardStateMachine(config)
     ts = drive_to_still(sm, config)
     result = sm.tick(make_tick(ts + 1, motion_short=config.wake_short_thresh + 1))
+    assert result.state is GuardState.STILL
+
+
+def test_soft_wake_confirmed_after_awake_confirm_sec(config):
+    sm = GuardStateMachine(config)
+    ts = drive_to_still(sm, config)
+    ts += 1
+    sm.tick(make_tick(ts, motion_short=config.wake_short_thresh + 1))
+    result = sm.tick(make_tick(ts + config.awake_confirm_sec, motion_short=config.wake_short_thresh + 1))
     assert result.state is GuardState.WOKE_UP
 
 
-def test_wake_via_long_threshold_requires_sustain(config):
+def test_wake_via_long_threshold_requires_sustain_then_confirm(config):
     sm = GuardStateMachine(config)
     ts = drive_to_still(sm, config)
     ts += 1
     sm.tick(make_tick(ts, motion_score=config.wake_long_thresh + 1))
     result = sm.tick(make_tick(ts + config.wake_sustain_sec / 2, motion_score=config.wake_long_thresh + 1))
     assert result.state is GuardState.STILL
+    # long-threshold sustain is cleared, but F7's awake-confirm timer
+    # only starts counting from when the signal first became "soft
+    # wake" true (i.e. once wake_sustain_sec elapses) -- still a stir,
+    # not an instant transition, until AWAKE_CONFIRM_SEC passes.
     result = sm.tick(make_tick(ts + config.wake_sustain_sec, motion_score=config.wake_long_thresh + 1))
+    assert result.state is GuardState.STILL
+    result = sm.tick(make_tick(ts + config.wake_sustain_sec + config.awake_confirm_sec, motion_score=config.wake_long_thresh + 1))
     assert result.state is GuardState.WOKE_UP
+
+
+# --------------------------------------------------------------------
+# F7: stir vs wake-up -- evidence pauses, drains, then fully clears
+# --------------------------------------------------------------------
+
+def test_stir_freezes_evidence_without_resetting(config):
+    sm = GuardStateMachine(config)
+    ts = drive_to_suspect(sm, config)
+    evidence_before = sm.sleep_evidence_seconds
+    assert evidence_before > 0
+    ts += 1
+    result = sm.tick(make_tick(ts, motion_short=config.wake_short_thresh + 1))
+    assert result.state is GuardState.SLEEPING_SUSPECT
+    assert sm.sleep_evidence_seconds == pytest.approx(evidence_before)
+    # still frozen partway through the stir window
+    result = sm.tick(make_tick(ts + config.stir_max_sec / 2, motion_short=config.wake_short_thresh + 1))
+    assert result.state is GuardState.SLEEPING_SUSPECT
+    assert sm.sleep_evidence_seconds == pytest.approx(evidence_before)
+
+
+def test_stir_resolves_and_evidence_resumes_growing(config):
+    sm = GuardStateMachine(config)
+    ts = drive_to_suspect(sm, config)
+    evidence_before = sm.sleep_evidence_seconds
+    ts += 1
+    sm.tick(make_tick(ts, motion_short=config.wake_short_thresh + 1))
+    ts += 1
+    # motion drops back below threshold well before stir_max_sec -- the
+    # guard settles back down, nothing lost
+    result = sm.tick(make_tick(ts, motion_score=0, motion_short=0))
+    assert result.state is GuardState.SLEEPING_SUSPECT
+    assert sm.sleep_evidence_seconds >= evidence_before
+
+
+def test_drain_zone_slowly_reduces_evidence(config):
+    sm = GuardStateMachine(config)
+    ts = drive_to_suspect(sm, config)
+    evidence_before = sm.sleep_evidence_seconds
+    ts += 1
+    stir_start = ts
+    sm.tick(make_tick(ts, motion_short=config.wake_short_thresh + 1))
+    # into the drain zone (past stir_max_sec, short of awake_confirm_sec)
+    drain_ts = stir_start + config.stir_max_sec + 1
+    result = sm.tick(make_tick(drain_ts, motion_short=config.wake_short_thresh + 1))
+    assert result.state is GuardState.SLEEPING_SUSPECT
+    assert sm.sleep_evidence_seconds < evidence_before
+
+
+def test_awake_confirm_sec_fully_clears_evidence(config):
+    sm = GuardStateMachine(config)
+    ts = drive_to_suspect(sm, config)
+    ts += 1
+    stir_start = ts
+    sm.tick(make_tick(ts, motion_short=config.wake_short_thresh + 1))
+    result = sm.tick(make_tick(stir_start + config.awake_confirm_sec, motion_short=config.wake_short_thresh + 1))
+    assert result.state is GuardState.WOKE_UP
+    assert sm.sleep_evidence_seconds == 0
+
+
+def test_episode_closed_reported_after_alert_and_confirmed_wake(config):
+    sm = GuardStateMachine(config)
+    alert_ts = drive_to_alert(sm, config)
+    sm.tick(make_tick(alert_ts + 1, motion_score=0, head_tilt=config.head_tilt_fwd + 1))  # -> POST_ALERT
+    wake_start = alert_ts + 2
+    sm.tick(make_tick(wake_start, motion_short=config.wake_short_thresh + 1))
+    result = sm.tick(make_tick(wake_start + config.awake_confirm_sec, motion_short=config.wake_short_thresh + 1))
+    assert result.state is GuardState.WOKE_UP
+    assert result.episode_closed is True
+    assert result.episode_alert_ts == pytest.approx(alert_ts)
+    assert result.episode_wake_started_ts == pytest.approx(wake_start)
+
+
+def test_episode_not_closed_when_no_alert_had_fired(config):
+    """A stir/confirm cycle from plain STILL (never reached ALERT) isn't
+    a closed "episode" in the alert-lifecycle sense -- nothing to log."""
+    sm = GuardStateMachine(config)
+    ts = drive_to_still(sm, config)
+    ts += 1
+    sm.tick(make_tick(ts, motion_short=config.wake_short_thresh + 1))
+    result = sm.tick(make_tick(ts + config.awake_confirm_sec, motion_short=config.wake_short_thresh + 1))
+    assert result.state is GuardState.WOKE_UP
+    assert result.episode_closed is False
+
+
+def test_hard_wake_bbox_still_instant_even_with_open_episode(config):
+    """The bbox backstop (a real stand-up) is unambiguous and bypasses
+    the stir/drain/confirm tiering entirely -- it still closes an open
+    episode immediately, same as before F7."""
+    sm = GuardStateMachine(config)
+    alert_ts = drive_to_alert(sm, config)
+    sm.tick(make_tick(alert_ts + 1, motion_score=0, head_tilt=config.head_tilt_fwd + 1))  # -> POST_ALERT
+    result = sm.tick(make_tick(alert_ts + 2, bbox_wake=True))
+    assert result.state is GuardState.WOKE_UP
+    assert result.episode_closed is True
+    # Regression check: a hard wake never necessarily ran through the
+    # soft-wake duration tracker, so episode_wake_started_ts must not be
+    # None (the runner does ts - episode_wake_started_ts unconditionally
+    # once episode_closed is True) -- for an instant wake, "started" and
+    # "now" are the same tick.
+    assert result.episode_wake_started_ts == pytest.approx(alert_ts + 2)
+    assert result.episode_closed is True
 
 
 def test_wake_from_sleeping_suspect(config):
@@ -162,10 +282,11 @@ def test_wake_from_active_bounces_through_woke_up(config):
 def test_wake_overrides_alert_state_directly(config):
     """This is the exact bug from field verification: a stand-up during
     ALERT/SLEEPING_SUSPECT must interrupt it. Previously ALERT had zero
-    wake check and stayed ALERT forever until externally acknowledged."""
+    wake check and stayed ALERT forever until externally acknowledged.
+    A stand-up is a hard wake (bbox), which stays instant under F7."""
     sm = GuardStateMachine(config)
     ts = drive_to_alert(sm, config)
-    result = sm.tick(make_tick(ts + 1, motion_short=config.wake_short_thresh + 1))
+    result = sm.tick(make_tick(ts + 1, bbox_wake=True))
     assert result.state is GuardState.WOKE_UP
 
 

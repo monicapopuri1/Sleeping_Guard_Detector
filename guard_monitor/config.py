@@ -91,6 +91,20 @@ class GuardMonitorConfig:
     # replaces WOKE_UP_SUSTAIN_SEC (was 10)
     woke_up_hold_sec: float = 3.0
 
+    # --- F7 (2026-09 field verification): stir vs wake-up ---------------
+    # The bbox backstop (a stand-up) is unambiguous and stays an instant
+    # wake. The two motion-based signals (short burst, sustained long
+    # threshold) are ambiguous -- a guard tossing in their sleep looks
+    # the same to them as someone starting to wake -- so they no longer
+    # hard-reset evidence the instant they fire. Instead: 0-STIR_MAX_SEC
+    # of continuous motion-based wake signal = a "stir", evidence is
+    # frozen (kept, not grown, not drained). STIR_MAX_SEC-AWAKE_CONFIRM_SEC
+    # = evidence drains at EVIDENCE_DECAY_SLOW. AWAKE_CONFIRM_SEC+ of
+    # continuous signal = the episode is genuinely over: full reset,
+    # same as the bbox backstop's instant reset.
+    stir_max_sec: float = 15.0
+    awake_confirm_sec: float = 60.0
+
     # --- Fix 2: alert must not reset the evidence ----------------------
     realert_cooldown_sec: float = 180.0
     redoze_min_zero_sec: float = 15.0

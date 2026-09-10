@@ -26,13 +26,26 @@ broke and why):
                                             for as long as sleep persists
     WOKE_UP           -> ACTIVE            after WOKE_UP_HOLD_SEC
 
-    (ANY state except ABSENT) -> WOKE_UP   wake condition holds -- see
-                                            _wake_condition. This is
-                                            evaluated before the
-                                            per-state logic above, so it
-                                            preempts every other
-                                            transition including out of
-                                            ALERT/POST_ALERT.
+    (ANY state except ABSENT) -> WOKE_UP   a "hard" wake (bbox stand-up,
+                                            see _hard_wake) fires instantly.
+                                            A "soft" wake (short motion
+                                            burst or sustained long-window
+                                            motion, see _soft_wake) is
+                                            ambiguous, so it goes through
+                                            three tiers instead of an
+                                            instant reset (F7):
+                                              0-STIR_MAX_SEC:        stir,
+                                                evidence frozen
+                                              STIR_MAX_SEC-
+                                              AWAKE_CONFIRM_SEC:      evidence
+                                                drains slowly
+                                              AWAKE_CONFIRM_SEC+:     confirmed
+                                                awake, same instant reset as
+                                                a hard wake
+                                            Both checks are evaluated before
+                                            the per-state logic above, for
+                                            every state except ABSENT/WOKE_UP,
+                                            preempting any other transition.
 
 Track loss and manual acknowledgement are external lifecycle events
 (like "a track appears"), handled by on_track_lost() / acknowledge_alert().
@@ -80,6 +93,12 @@ class GuardResult:
     state: GuardState
     alert_fired: bool  # True on every tick the runner should dispatch an alert
     reasons: tuple  # which suspect reason(s) most recently triggered
+    # F7: set only on the tick a sleep episode that had at least one real
+    # alert fully closes (AWAKE_CONFIRM_SEC of sustained wake). The runner
+    # uses these to log the episode's alert-sent/woke/closed timestamps.
+    episode_closed: bool = False
+    episode_alert_ts: Optional[float] = None
+    episode_wake_started_ts: Optional[float] = None
 
 
 _SUSPECT_REASONS = ("head_tilt", "spine_lean", "hand_at_head", "head_conf_low", "vlm_asleep")
@@ -103,6 +122,13 @@ class GuardStateMachine:
             name: DebouncedFlag(config.signal_debounce_true_sec, config.signal_debounce_false_sec)
             for name in _DEBOUNCED_REASONS
         }
+        # F7: continuous-duration tracking for the two ambiguous
+        # (motion-based) wake signals, plus the current episode's
+        # alert bookkeeping (an "episode" spans STILL-with-evidence
+        # through however many re-alerts, until a real wake closes it).
+        self._wake_condition_since: Optional[float] = None
+        self._episode_alert_sent: bool = False
+        self._episode_alert_ts: Optional[float] = None
 
     def on_track_lost(self) -> None:
         """External lifecycle event: the tracker dropped this id."""
@@ -118,18 +144,24 @@ class GuardStateMachine:
         self.sleep_evidence_seconds = 0
         self._low_motion_since = None
         self._suspect_cond_since = {k: None for k in _SUSPECT_REASONS}
+        self._wake_condition_since = None
+        self._episode_alert_sent = False
+        self._episode_alert_ts = None
         for flag in self._debounced.values():
             flag.reset()
 
-    def _wake_condition(self, t: GuardTick) -> bool:
-        """Any ONE of three independent signals counts as a wake, because
-        each fails differently: keypoint-jitter noise can fake a motion
-        score but not a doubling bbox height; a brief-but-real stand-up
-        can be smoothed away by the long sliding window but not by the
-        short one; a genuinely slow, deliberate wake might not clear the
-        short-window bar but will clear the long one if sustained."""
-        if t.bbox_wake:
-            return True
+    def _hard_wake(self, t: GuardTick) -> bool:
+        """A bounding-box stand-up is unambiguous -- nobody does this
+        while genuinely staying asleep -- so it bypasses the stir/drain/
+        confirm tiering below and resets immediately (F1 item 4)."""
+        return t.bbox_wake
+
+    def _soft_wake(self, t: GuardTick) -> bool:
+        """The two motion-based signals are ambiguous: tossing while
+        still asleep can trip them the same as someone starting to wake.
+        Returns whether either is active THIS tick; how long it has been
+        continuously active is what tick() uses to decide stir vs drain
+        vs a fully-confirmed wake (F7)."""
         if t.motion_short > self.config.wake_short_thresh:
             return True
         if t.motion_score > self.config.wake_long_thresh:
@@ -141,18 +173,32 @@ class GuardStateMachine:
             self._long_wake_since = None
         return False
 
-    def _enter_woke_up(self, ts: float) -> None:
+    def _enter_woke_up(self, ts: float) -> "tuple[bool, Optional[float], Optional[float]]":
+        """Returns (episode_was_open, alert_ts, wake_started_ts) from
+        before the reset, so the caller can report the closed episode."""
+        episode_was_open = self._episode_alert_sent
+        alert_ts = self._episode_alert_ts
+        # A hard (bbox) wake never necessarily went through the soft-wake
+        # duration tracker, so it has no "when did this start" other than
+        # right now -- an instant wake's start and confirmation are the
+        # same moment.
+        wake_started_ts = self._wake_condition_since if self._wake_condition_since is not None else ts
+
         self.state = GuardState.WOKE_UP
         self._woke_up_since = ts
         self._long_wake_since = None
         self._low_motion_since = None
         self._suspect_cond_since = {k: None for k in _SUSPECT_REASONS}
         self._last_alert_ts = None
+        self._wake_condition_since = None
+        self._episode_alert_sent = False
+        self._episode_alert_ts = None
         # Fix 2 item 5: WOKE_UP is the one transition allowed to hard-reset
         # the evidence counter; everywhere else it only decays.
         self.sleep_evidence_seconds = 0
         for flag in self._debounced.values():
             flag.reset()
+        return episode_was_open, alert_ts, wake_started_ts
 
     def tick(self, t: GuardTick) -> GuardResult:
         if self.state is GuardState.ABSENT:
@@ -163,12 +209,42 @@ class GuardStateMachine:
         dt = max(0, t.ts - self._last_ts) if self._last_ts is not None else 0
         self._last_ts = t.ts
 
-        # Fix 1: evaluated before per-state logic, for every state except
-        # ABSENT/WOKE_UP (WOKE_UP already *is* the wake state -- see its
-        # own handler for the hold-then-ACTIVE timer).
-        if self.state is not GuardState.WOKE_UP and self._wake_condition(t):
-            self._enter_woke_up(t.ts)
-            return GuardResult(self.state, False, self._suspect_triggered_reasons)
+        # Fix 1 / F7: evaluated before per-state logic, for every state
+        # except ABSENT/WOKE_UP (WOKE_UP already *is* the wake state --
+        # see its own handler for the hold-then-ACTIVE timer).
+        if self.state is not GuardState.WOKE_UP:
+            if self._hard_wake(t):
+                episode_was_open, alert_ts, wake_started_ts = self._enter_woke_up(t.ts)
+                return GuardResult(
+                    self.state, False, self._suspect_triggered_reasons,
+                    episode_closed=episode_was_open, episode_alert_ts=alert_ts,
+                    episode_wake_started_ts=wake_started_ts,
+                )
+
+            if self._soft_wake(t):
+                if self._wake_condition_since is None:
+                    self._wake_condition_since = t.ts
+                wake_duration = t.ts - self._wake_condition_since
+
+                if wake_duration >= self.config.awake_confirm_sec:
+                    episode_was_open, alert_ts, wake_started_ts = self._enter_woke_up(t.ts)
+                    return GuardResult(
+                        self.state, False, self._suspect_triggered_reasons,
+                        episode_closed=episode_was_open, episode_alert_ts=alert_ts,
+                        episode_wake_started_ts=wake_started_ts,
+                    )
+                if wake_duration >= self.config.stir_max_sec:
+                    # F7 item 2: draining zone -- the stir has gone on long
+                    # enough that it's starting to look like a real wake.
+                    self.sleep_evidence_seconds = max(0, self.sleep_evidence_seconds - self.config.evidence_decay_slow * dt)
+                # else F7 item 1: pure stir -- evidence frozen, not touched.
+                # Either way, the per-state handlers below are skipped
+                # this tick: no dwell/debounce clock advances while the
+                # guard is actively moving, and none of it is lost --
+                # it just doesn't progress until the stir resolves.
+                return GuardResult(self.state, False, self._suspect_triggered_reasons)
+            else:
+                self._wake_condition_since = None
 
         if self.state is GuardState.ACTIVE:
             return self._tick_active(t, dt)
@@ -242,6 +318,9 @@ class GuardStateMachine:
             if not suppressed:
                 self.state = GuardState.ALERT
                 self._last_alert_ts = t.ts
+                self._episode_alert_sent = True
+                if self._episode_alert_ts is None:
+                    self._episode_alert_ts = t.ts
                 return GuardResult(self.state, True, self._suspect_triggered_reasons)
         return GuardResult(self.state, False, self._suspect_triggered_reasons)
 
